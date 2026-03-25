@@ -1,0 +1,1180 @@
+---
+title: "Germany Polling Analysis for Next General Election"
+subtitle: "Kenya Coalition Loading..."
+author: "Political Analysis Project"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    df_print: paged
+    css: "style.css"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  fig.align = "center"
+)
+
+library(tidyverse)
+library(rvest)
+library(plotly)
+library(DT)
+library(ggrepel)
+library(scales)
+library(lubridate)
+library(viridis)
+library(kableExtra)
+library(zoo)
+library(httr)
+library(glue)
+library(patchwork)
+```
+
+```{r colour_palette, include=FALSE}
+# Official German party colours
+party_colours <- c(
+  "AfD"         = "#009EE0",
+  "CDU/CSU"     = "#000000",
+  "SPD"         = "#E3000F",
+  "Grüne"       = "#1AA037",
+  "Die Linke"   = "#BE3075",
+  "BSW"         = "#8B1A1A",
+  "FDP"         = "#FFED00",
+  "Other"       = "#999999"
+)
+```
+
+---
+
+> **A note on data sources:** Cross-firm polling averages are drawn from INSA, Forsa, Forschungsgruppe Wahlen, Infratest dimap, and YouGov Germany. Where averages diverge, the PolitPro aggregate trend is used as the baseline. The 2025 federal election result and the post-election polling trajectory through March 2026 are both incorporated.
+
+---
+
+# Data: 2025 Election Result & Post-Election Polling
+
+This section establishes the 2025 Bundestag election baseline and builds the post-election polling dataset. Germany uses personalised proportional representation (PR) with a 5% threshold, so vote shares translate directly and proportionally into seats.
+
+```{r election_baseline}
+# 2025 Federal Election Results (23 February 2025) — Official Federal Returning Officer
+ge2025 <- tibble(
+  Party         = c("CDU/CSU", "AfD", "SPD", "Grüne", "Die Linke", "BSW", "FDP", "SSW", "Other"),
+  Vote_pct      = c(28.52, 20.80, 16.41, 11.59, 8.77, 4.97, 4.34, 0.15, 4.45),
+  Seats_2025    = c(208, 151, 121, 85, 64, 0, 0, 1, 0),
+  # 2021 baseline for comparison
+  Vote_2021     = c(24.1, 10.4, 25.7, 14.7, 4.9, 0, 11.4, 0.1, 8.7),
+  Seats_2021    = c(197, 83, 206, 118, 39, 0, 92, 1, 0)
+)
+
+# Summary display
+ge2025 %>%
+  filter(Party != "Other") %>%
+  select(Party, `2021 Vote %` = Vote_2021, `2021 Seats` = Seats_2021,
+         `2025 Vote %` = Vote_pct, `2025 Seats` = Seats_2025) %>%
+  arrange(desc(`2025 Vote %`)) %>%
+  kable(caption = "2025 Bundestag Election Result vs 2021 — Official Federal Returning Officer",
+        align = "lrrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(c("CDU/CSU","AfD","SPD","Grüne","Die Linke","BSW","FDP") == "AfD"),
+           bold = TRUE, color = "white", background = "#009EE0") %>%
+  row_spec(which(c("CDU/CSU","AfD","SPD","Grüne","Die Linke","BSW","FDP") == "CDU/CSU"),
+           bold = TRUE, color = "white", background = "#000000") %>%
+  row_spec(which(c("CDU/CSU","AfD","SPD","Grüne","Die Linke","BSW","FDP") == "SPD"),
+           bold = TRUE, color = "white", background = "#E3000F") %>%
+  row_spec(which(c("CDU/CSU","AfD","SPD","Grüne","Die Linke","BSW","FDP") == "Grüne"),
+           bold = TRUE, color = "white", background = "#1AA037") %>%
+  row_spec(which(c("CDU/CSU","AfD","SPD","Grüne","Die Linke","BSW","FDP") == "Die Linke"),
+           bold = TRUE, color = "white", background = "#BE3075") %>%
+  footnote(
+    general = "BSW (4.97%) narrowly missed the 5% threshold by approximately 14,000 votes — no Bundestag seats.
+    FDP (4.34%) also fell below threshold — out of parliament for the first time since 1949 as a founding party.
+    Die Linke (8.77%) won 6 direct mandates (4 in Berlin alone), triggering proportional representation despite being at risk.
+    Bundestag capped at 630 seats following 2023 reform. SSW (Danish/Frisian minority) exempt from 5% threshold.",
+    general_title = "Note: "
+  )
+```
+
+```{r post_election_polls}
+# Post-election polling trend: March 2025 – March 2026
+# Sources: INSA (weekly), Forsa, Infratest dimap, Forschungsgruppe Wahlen, YouGov DE
+# PolitPro aggregate trend used as cross-firm baseline.
+# Key anchors:
+#   Feb 2025: Election result (CDU 28.5, AfD 20.8, SPD 16.4, Green 11.6, Linke 8.8)
+#   Apr 2025: Post-election stabilisation — CDU coalition talks with SPD
+#   Apr 9 2025: CDU/SPD coalition contract signed — grand coalition (GroKo) formed
+#   May–Jun 2025: AfD rises as GroKo seen as "politics as usual"; CDU falls
+#   Sep 2025: Saxony-Anhalt polling AfD 39% (Infratest dimap) — state election Sep 2026 looms
+#   Jan 2026: AfD at record national high (27% GMS); first time ahead of CDU in major poll
+#   Mar 2026: INSA 20 Mar: CDU 26%, AfD 25%, SPD 15%, Grüne 12%, Linke 11%
+
+polls_de <- tibble(
+  date = as.Date(c(
+    "2025-02-01",  # Election month
+    "2025-03-01", "2025-04-01", "2025-05-01", "2025-06-01",
+    "2025-07-01", "2025-08-01", "2025-09-01", "2025-10-01",
+    "2025-11-01", "2025-12-01",
+    "2026-01-01", "2026-02-01", "2026-03-01"
+  )),
+  CDU_CSU  = c(28.5,  28, 27, 26, 26,  26, 26, 26, 26,  25, 25,  25, 26, 26),
+  AfD      = c(20.8,  21, 22, 23, 23,  23, 24, 24, 25,  25, 26,  27, 25, 25),
+  SPD      = c(16.4,  16, 16, 15, 15,  15, 15, 15, 15,  15, 15,  15, 15, 15),
+  Gruene   = c(11.6,  12, 12, 12, 12,  12, 12, 12, 12,  12, 12,  12, 12, 12),
+  Linke    = c( 8.8,   9,  9, 10, 10,  10, 10, 10, 10,  10, 10,  10, 10, 11),
+  BSW      = c( 5.0,   4,  4,  4,  4,   4,  4,  4,  4,   3,  3,   3,  3,  3),
+  FDP      = c( 4.3,   3,  3,  3,  3,   3,  3,  3,  3,   3,  3,   3,  3,  3),
+  Other    = c( 4.6,   7,  7,  7,  7,   7,  6,  6,  5,   7,  6,   5,  6,  5)
+)
+
+# Reshape to long format
+polls_long_de <- polls_de %>%
+  pivot_longer(
+    cols = c(CDU_CSU, AfD, SPD, Gruene, Linke, BSW, FDP, Other),
+    names_to  = "Party",
+    values_to = "Share"
+  ) %>%
+  mutate(
+    Party = recode(Party,
+                   "CDU_CSU" = "CDU/CSU",
+                   "Gruene"  = "Grüne",
+                   "Linke"   = "Die Linke"),
+    Party = factor(Party, levels = c("AfD", "CDU/CSU", "SPD", "Grüne",
+                                      "Die Linke", "BSW", "FDP", "Other"))
+  ) %>%
+  arrange(Party, date) %>%
+  group_by(Party) %>%
+  mutate(rolling_avg = rollmean(Share, k = 3, fill = NA, align = "right")) %>%
+  ungroup()
+
+cat("Dataset loaded:", nrow(polls_de), "monthly polling observations\n")
+cat("Date range:", format(min(polls_de$date)), "to", format(max(polls_de$date)), "\n")
+```
+
+---
+
+# Poll Aggregation & Trend Modelling {.tabset}
+
+## Polling Trends (2025–2026)
+
+```{r trend_chart_de}
+p_trend_de <- polls_long_de %>%
+  filter(!Party %in% c("Other", "BSW", "FDP")) %>%
+  ggplot(aes(x = date, colour = Party)) +
+  geom_point(aes(y = Share), alpha = 0.4, size = 2) +
+  geom_line(aes(y = rolling_avg), linewidth = 1.2, na.rm = TRUE) +
+  # Annotation: GroKo coalition formed
+  geom_vline(xintercept = as.numeric(as.Date("2025-04-09")),
+             linetype = "dashed", colour = "#E3000F", alpha = 0.7) +
+  annotate("text", x = as.Date("2025-04-15"), y = 30,
+           label = "GroKo\nformed", colour = "#E3000F", size = 3, hjust = 0) +
+  # Annotation: AfD overtakes CDU/CSU in polls
+  geom_vline(xintercept = as.numeric(as.Date("2026-01-01")),
+             linetype = "dotted", colour = "#009EE0", alpha = 0.8) +
+  annotate("text", x = as.Date("2026-01-05"), y = 28,
+           label = "AfD leads CDU\nin first major poll", colour = "#009EE0", size = 3, hjust = 0) +
+  scale_colour_manual(values = c(
+    "AfD"       = "#009EE0",
+    "CDU/CSU"   = "#000000",
+    "SPD"       = "#E3000F",
+    "Grüne"     = "#1AA037",
+    "Die Linke" = "#BE3075"
+  )) +
+  scale_y_continuous(labels = label_percent(scale = 1), limits = c(0, 38)) +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b\n%Y") +
+  labs(
+    title    = "German Bundestag Voting Intention, Feb 2025 – Mar 2026",
+    subtitle = "Monthly polling averages with 3-month rolling mean (solid line). BSW, FDP excluded (below/near threshold).",
+    x        = NULL,
+    y        = "Vote Share (%)",
+    colour   = "Party",
+    caption  = "Sources: INSA, Forsa, Infratest dimap, Forschungsgruppe Wahlen, YouGov DE. PolitPro aggregate baseline.\nDots = raw monthly average; lines = 3-month rolling mean."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    legend.position  = "right",
+    panel.grid.minor = element_blank()
+  )
+
+print(p_trend_de)
+```
+
+## Current Snapshot (March 2026)
+
+```{r snapshot_de}
+snapshot_de <- tibble(
+  Party = c("CDU/CSU", "AfD", "SPD", "Grüne", "Die Linke", "BSW", "FDP"),
+  # INSA 20 Mar 2026 cross-checked against PolitPro aggregate trend
+  Share = c(26, 25, 15, 12, 11, 3, 3),
+  Low   = c(24, 23, 13, 10,  9, 2, 2),
+  High  = c(29, 27, 17, 14, 13, 5, 5)
+) %>%
+  mutate(
+    Party     = fct_reorder(Party, Share),
+    Threshold = Share >= 5
+  )
+
+p_snap_de <- snapshot_de %>%
+  ggplot(aes(x = Party, y = Share, fill = Party)) +
+  geom_col(width = 0.65) +
+  geom_errorbar(aes(ymin = Low, ymax = High), width = 0.25, colour = "grey30") +
+  geom_text(aes(label = paste0(Share, "%")), hjust = -0.3, size = 4.5, fontface = "bold") +
+  geom_hline(yintercept = 5, linetype = "dashed", colour = "darkred", linewidth = 0.8) +
+  annotate("text", x = 0.7, y = 5.7, label = "5% threshold", colour = "darkred", size = 3) +
+  coord_flip(ylim = c(0, 36)) +
+  scale_fill_manual(values = c(
+    "CDU/CSU"   = "#000000",
+    "AfD"       = "#009EE0",
+    "SPD"       = "#E3000F",
+    "Grüne"     = "#1AA037",
+    "Die Linke" = "#BE3075",
+    "BSW"       = "#8B1A1A",
+    "FDP"       = "#FFED00"
+  )) +
+  labs(
+    title    = "German Federal Voting Intention Snapshot — March 2026",
+    subtitle = "Cross-firm average (INSA, Forsa, Infratest dimap). Dashed line = 5% Bundestag entry threshold.",
+    x        = NULL,
+    y        = "Vote Share (%)",
+    caption  = "BSW and FDP currently below or at threshold — at risk of non-representation in 2029.\nSources: INSA (20 Mar 2026), PolitPro aggregate."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+print(p_snap_de)
+```
+
+## Seat Distribution (Current Polling)
+
+```{r seat_distribution_de}
+# Proportional seat allocation based on current polling (5-party Bundestag)
+# Using Sainte-Laguë method approximation with 630 seats
+# Parties below 5%: BSW, FDP, Other excluded (no seats)
+
+current_poll_de <- tibble(
+  Party      = c("CDU/CSU", "AfD", "SPD", "Grüne", "Die Linke"),
+  Poll_share = c(26, 25, 15, 12, 11),
+  # Proportional seat allocation on eligible-party votes (total = 89%)
+  # Each party's share of eligible vote x 630
+  Seats_proj = c(184, 177, 106, 85, 78)
+) %>%
+  arrange(desc(Seats_proj))
+
+current_poll_de %>%
+  kable(caption = "Projected Seat Distribution at Current Polls (Mar 2026) — Sainte-Laguë Approximation",
+        align = "lrr",
+        col.names = c("Party", "Poll Share (%)", "Projected Seats")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(current_poll_de$Party == "AfD"),
+           bold = TRUE, color = "white", background = "#009EE0") %>%
+  row_spec(which(current_poll_de$Party == "CDU/CSU"),
+           bold = TRUE, color = "white", background = "#000000") %>%
+  row_spec(which(current_poll_de$Party == "SPD"),
+           bold = TRUE, color = "white", background = "#E3000F") %>%
+  row_spec(which(current_poll_de$Party == "Grüne"),
+           bold = TRUE, color = "white", background = "#1AA037") %>%
+  row_spec(which(current_poll_de$Party == "Die Linke"),
+           bold = TRUE, color = "white", background = "#BE3075") %>%
+  footnote(
+    general = "Bundestag capped at 630 seats (2023 reform). Parties below 5% (BSW ~3%, FDP ~3%) receive no seats.
+    Proportional system means seats track vote share closely.
+    CDU/CSU + SPD GroKo would hold 290/630 = 46% of seats — SHORT of 316 majority under current polling.
+    A three-party coalition (e.g. CDU/CSU + SPD + Grüne 'Kenya coalition') would hold 375 seats — comfortable majority.",
+    general_title = "Note: "
+  )
+```
+
+---
+
+# The AfD Threat: Rise, Structure & Ceiling {.tabset}
+
+## The AfD Trajectory
+
+The AfD doubled its vote at the 2025 election and has continued to rise post-election, becoming the first far-right party to poll first nationally in modern German history. This section analyses the trajectory, its structural drivers, and the ceiling question.
+
+```{r afd_trajectory}
+afd_history <- tibble(
+  Year     = c(2013, 2017, 2019, 2021, 2024, 2025, 2026),
+  Context  = c("Federal founding election", "Federal — refugee crisis benefit",
+                "European Parliament", "Federal — post-Merkel era",
+                "European Parliament", "Federal snap election",
+                "Current cross-firm polling avg (Mar)"),
+  Share    = c(4.7, 12.6, 11.0, 10.4, 15.9, 20.8, 25.0),
+  Type     = c("Election", "Election", "Election", "Election", "Election", "Election", "Poll")
+)
+
+p_afd <- afd_history %>%
+  ggplot(aes(x = Year, y = Share, colour = Type, shape = Type)) +
+  geom_line(colour = "#009EE0", linewidth = 1.4) +
+  geom_point(size = 4) +
+  geom_text_repel(aes(label = paste0(Share, "%")), size = 3.8, nudge_y = 1.2, fontface = "bold") +
+  geom_hline(yintercept = 5,  linetype = "dashed", colour = "grey50") +
+  geom_hline(yintercept = 33, linetype = "dashed", colour = "darkred") +
+  annotate("text", x = 2013.2, y = 6.0, label = "Entry threshold (5%)",
+           colour = "grey40", size = 3, hjust = 0) +
+  annotate("text", x = 2013.2, y = 34.0,
+           label = "~33% estimated ceiling (no far-right precedent above this post-WWII)",
+           colour = "darkred", size = 3, hjust = 0) +
+  scale_colour_manual(values = c("Election" = "#009EE0", "Poll" = "#666666")) +
+  scale_shape_manual(values = c("Election" = 16, "Poll" = 1)) +
+  scale_y_continuous(labels = label_percent(scale = 1), limits = c(0, 40)) +
+  scale_x_continuous(breaks = c(2013, 2017, 2019, 2021, 2024, 2025, 2026)) +
+  labs(
+    title    = "AfD Vote Share: 2013–2026",
+    subtitle = "From 4.7% at founding (2013) to 25% in current polls — a 12-year sustained rise",
+    x        = "Year",
+    y        = "Vote Share (%)",
+    colour   = NULL, shape = NULL,
+    caption  = "Sources: Federal Returning Officer (elections); INSA/PolitPro aggregate (2026 poll)."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+
+print(p_afd)
+```
+
+## East–West Divide
+
+```{r east_west_divide}
+east_west <- tibble(
+  State   = c("Thuringia", "Saxony", "Saxony-Anhalt", "Brandenburg", "Mecklenburg-VP",
+               "Berlin (East)", "Berlin (West)", "Bavaria", "Baden-Württemberg",
+               "NRW", "Rhineland-Palat.", "Hamburg"),
+  AfD_pct = c(32.8, 31.8, 29.3, 27.5, 24.0, 22.0, 12.0, 19.3, 17.0, 16.0, 15.4, 12.0),
+  Region  = c(rep("Former East Germany", 5),
+               "East Berlin", "West Berlin",
+               rep("Former West Germany", 5))
+)
+
+p_ew <- east_west %>%
+  mutate(State = fct_reorder(State, AfD_pct)) %>%
+  ggplot(aes(x = State, y = AfD_pct, fill = Region)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = paste0(AfD_pct, "%")), hjust = -0.2, size = 3.8, fontface = "bold") +
+  coord_flip(ylim = c(0, 42)) +
+  geom_hline(yintercept = 20.8, linetype = "dashed", colour = "#009EE0") +
+  annotate("text", x = 1.5, y = 21.5, label = "National 2025 result (20.8%)",
+           colour = "#009EE0", size = 3, hjust = 0) +
+  scale_fill_manual(values = c(
+    "Former East Germany" = "#009EE0",
+    "East Berlin"         = "#55BEDE",
+    "West Berlin"         = "#AADDEE",
+    "Former West Germany" = "#CCCCCC"
+  )) +
+  labs(
+    title    = "AfD Vote Share by State — 2025 Federal Election",
+    subtitle = "A stark East-West geography: AfD dominates all former East German states",
+    x        = NULL,
+    y        = "AfD Vote Share (%)",
+    fill     = "Region",
+    caption  = "Sources: Federal Returning Officer, state-level 2025 results. Selected states shown."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+print(p_ew)
+```
+
+**The East–West chasm is structurally significant.** The AfD secured all five former East German states in 2025, winning most direct constituencies there. In Saxony-Anhalt, current polling (Infratest dimap, Sep 2025) places the AfD at 39% — 12 points ahead of the CDU. In the West, the AfD typically polls 15–21%, well below its eastern strongholds. This geographic concentration has two consequences: it makes the Brandmauer harder to maintain in eastern state parliaments, and it suggests the AfD's national ceiling is partly an artifact of its relative weakness in the more populous West.
+
+## Is the AfD a Protest Party or a Structural Force?
+
+```{r afd_voters_profile}
+# AfD voter sociology — cross-tabulation from 2025 Infratest dimap exit poll + FES analysis
+voter_groups <- tibble(
+  Group         = c("Working class (blue collar)", "Unemployed", "No formal education",
+                     "Economic situation: bad/poor", "Eastern voters",
+                     "18-24 (first-time voters)", "60+ voters",
+                     "University educated", "Western voters", "Satisfied with democracy"),
+  AfD_share     = c(29, 35, 28, 39, 31, 22, 15, 10, 16, 8),
+  National_avg  = c(21, 21, 21, 21, 21, 21, 21, 21, 21, 21),
+  Direction     = c("Over", "Over", "Over", "Over", "Over",
+                     "Over", "Under", "Under", "Under", "Under")
+)
+
+p_voters <- voter_groups %>%
+  mutate(
+    Group = fct_reorder(Group, AfD_share),
+    diff  = AfD_share - National_avg
+  ) %>%
+  ggplot(aes(x = Group, y = diff, fill = Direction)) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = 0, colour = "grey30") +
+  coord_flip() +
+  geom_text(aes(label = paste0(AfD_share, "%")),
+            hjust = ifelse(voter_groups$Direction == "Over", -0.2, 1.2),
+            size = 3.5, fontface = "bold") +
+  scale_fill_manual(values = c("Over" = "#009EE0", "Under" = "#CCCCCC"),
+                    labels = c("Over" = "Above national avg", "Under" = "Below national avg")) +
+  scale_y_continuous(limits = c(-15, 22)) +
+  labs(
+    title    = "AfD Over/Under-Performance by Voter Group — 2025 Federal Election",
+    subtitle = "Difference from 20.8% national average. Label shows group's actual AfD vote share.",
+    x        = NULL,
+    y        = "Deviation from national average (pp)",
+    fill     = NULL,
+    caption  = "Sources: Infratest dimap exit poll, FES voter migration analysis 2025."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+
+print(p_voters)
+```
+
+The AfD's sociology is critical to the ceiling question. Its over-performance among the economically marginalised, the unemployed, and eastern voters mirrors a structural realignment — not just protest voting. When the party polls **39% among those who rate their economic situation as poor**, that is not a fleeting anti-government reaction; it is a durable social coalition. The risk for mainstream parties is that economic improvement alone may not be sufficient to erode this support, because much AfD voting is about cultural and identity concerns as well as economic grievance.
+
+---
+
+# The Brandmauer (Firewall): Strength, Cracks & Scenarios {.tabset}
+
+## The Firewall's Architecture
+
+```{r brandmauer_status}
+brandmauer <- tibble(
+  Level       = c("Federal coalition", "Federal legislative votes",
+                   "State-level coalition", "State minority government",
+                   "Local/municipal cooperation"),
+  Status      = c("Holds — CDU/CSU refuses coalition with AfD",
+                   "BREACHED — CDU/FDP relied on AfD votes (Jan 29 2025) to pass migration motion",
+                   "Holds formally — no CDU-AfD coalition in any Länder",
+                   "Under pressure — Saxony minority CDU govt may need case-by-case AfD support post-2026",
+                   "Substantially eroded — CDU cooperates with AfD on 38% of direct AfD motions"),
+  Risk        = c("Low (2025-2028)", "Already occurred — precedent set",
+                   "High in Saxony-Anhalt after Sep 2026 (AfD at 39%)",
+                   "Likely in east German states 2026-2028",
+                   "Ongoing — common in Saxony, Saxony-Anhalt, Thuringia"),
+  Colour_flag = c("green", "red", "orange", "orange", "red")
+)
+
+brandmauer %>%
+  select(Level, Status, Risk) %>%
+  kable(
+    caption = "Brandmauer Status by Political Level (March 2026)",
+    col.names = c("Level", "Current Status", "Risk Assessment"),
+    align = "lll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  row_spec(2, bold = TRUE, color = "white", background = "#cc3333") %>%
+  row_spec(5, bold = FALSE, color = "white", background = "#cc3333") %>%
+  row_spec(3, bold = FALSE, color = "black", background = "#FFCC66") %>%
+  row_spec(4, bold = FALSE, color = "black", background = "#FFCC66") %>%
+  footnote(
+    general = "Red = already breached or substantially eroded. Orange = under pressure. Green = holding.
+    The January 29, 2025 vote in which CDU/FDP passed a migration motion using AfD votes was the first breach
+    of the cordon sanitaire at the federal level since 1945. Political scientist Isabelle Borucki called it
+    'a historic moment when the so-called Brandmauer fell'.
+    Source: WZB empirical study (2025), Wikipedia Firewall article, Jacobin Germany analysis.",
+    general_title = "Note: "
+  )
+```
+
+## Two Firewalls: A Conceptual Framework
+
+The WZB (Berlin Social Science Centre) distinguishes between **two distinct firewalls**:
+
+- **Firewall 1 (indirect cooperation):** Mainstream parties pass their own motions using AfD votes as a de facto majority. This was **breached** on January 29, 2025 at the federal level, and is routinely breached at municipal level in eastern Germany.
+- **Firewall 2 (direct cooperation):** Mainstream parties vote *in favour* of AfD motions or candidates. At the federal level this has not yet happened. At local level in eastern Germany, CDU representatives support AfD motions in approximately 38% of cases.
+
+```{r brandmauer_erosion}
+# Municipal-level cooperation data: WZB study (2025) — 11,053 local meetings analysed
+municipal_cooperation <- tibble(
+  Party         = c("Freie Wähler", "FDP (local)", "CDU (local)", "SPD (local)",
+                     "Greens (local)", "Die Linke (local)"),
+  AfD_support_pct = c(86.5, 38.6, 38.4, 12.0, 5.5, 3.0),
+  Sample_note   = c("Free Voters — frequently ally",
+                     "FDP local branches; same as federal breach Jan 2025",
+                     "CDU local branches; most significant given CDU size",
+                     "SPD local; mostly in transport/budget votes",
+                     "Greens local — rare exceptions only",
+                     "Die Linke — maintains firewall most consistently")
+)
+
+p_muni <- municipal_cooperation %>%
+  mutate(Party = fct_reorder(Party, AfD_support_pct)) %>%
+  ggplot(aes(x = Party, y = AfD_support_pct,
+             fill = AfD_support_pct > 30)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = paste0(AfD_support_pct, "%")),
+            hjust = -0.2, size = 4, fontface = "bold") +
+  coord_flip(ylim = c(0, 100)) +
+  geom_vline(xintercept = 0, colour = "grey30") +
+  scale_fill_manual(values = c("FALSE" = "#AAAAAA", "TRUE" = "#cc3333"),
+                    labels = c("FALSE" = "Minimal cooperation", "TRUE" = "Substantial cooperation")) +
+  labs(
+    title    = "Municipal-Level Cooperation with AfD Motions, by Party (2019–2024)",
+    subtitle = "Proportion of AfD motions receiving support from at least one member of each party in local parliaments",
+    x        = NULL,
+    y        = "% of AfD motions supported",
+    fill     = NULL,
+    caption  = "Source: WZB Berlin Social Sciences Center — 11,053 local parliament meetings across German districts (2025 study).\nEastern German district parliaments disproportionately represented due to higher AfD activity."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+
+print(p_muni)
+```
+
+## Can the AfD Force a Governance Crisis?
+
+```{r governance_scenarios}
+# Seat arithmetic for 2029 scenarios
+scenarios_2029_de <- tibble(
+  Party     = rep(c("CDU/CSU", "AfD", "SPD", "Grüne", "Die Linke"), 3),
+  Scenario  = rep(c("A: AfD surges (30%)\nGroKo punished; Grüne/Linke gain",
+                     "B: AfD holds (25%)\nCDU/SPD soften, left gains",
+                     "C: AfD fades (20%)\nCDU recovers, left still gains"), each = 5),
+  Vote_share = c(
+    # A: AfD surges to 30%; GroKo incumbency punishes CDU (22%) and SPD (11%); Grüne/Linke gain as opposition
+    22, 30, 11, 14, 13,
+    # B: AfD holds ~25%; CDU and SPD both shed 2pp to Grüne/Linke after 4 yrs in govt
+    24, 25, 13, 14, 13,
+    # C: AfD falls to 20%; CDU recovers, SPD still softens to Grüne/Linke
+    28, 20, 13, 15, 14
+  ),
+  Proj_seats = c(
+    # A: eligible 90% of vote -> Sainte-Laguë on 630 seats
+    154, 210, 77, 98, 91,   # A
+    170, 177, 92, 99, 92,   # B
+    196, 140, 91, 105, 98   # C
+  )
+)
+
+p_scen_de <- scenarios_2029_de %>%
+  mutate(Party = factor(Party, levels = c("CDU/CSU", "AfD", "SPD", "Grüne", "Die Linke"))) %>%
+  ggplot(aes(x = Party, y = Proj_seats, fill = Party)) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = 316, linetype = "dashed", colour = "darkred") +
+  facet_wrap(~Scenario) +
+  scale_fill_manual(values = c(
+    "CDU/CSU"   = "#000000",
+    "AfD"       = "#009EE0",
+    "SPD"       = "#E3000F",
+    "Grüne"     = "#1AA037",
+    "Die Linke" = "#BE3075"
+  )) +
+  scale_y_continuous(limits = c(0, 340)) +
+  labs(
+    title    = "2029 Bundestag Election Scenarios",
+    subtitle = "Three trajectories. Dashed line = majority threshold (316). AfD excluded from all coalitions under Brandmauer.",
+    x        = NULL, y = "Projected Seats",
+    caption  = "GroKo incumbency drag assumed throughout: SPD/CDU lose ground after 4 years in govt; Grüne/Linke gain as opposition. In all scenarios, CDU+SPD alone fall short of 316; a Kenya or left-bloc arrangement is required."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title      = element_text(face = "bold"),
+    legend.position = "none",
+    axis.text.x     = element_text(angle = 25, hjust = 1),
+    strip.text      = element_text(face = "bold", size = 9)
+  )
+
+print(p_scen_de)
+```
+
+**The AfD cannot force a hung parliament in the traditional sense** — Germany's PR system means a government can always be formed so long as non-AfD parties hold a collective majority. As of March 2026, the four non-AfD Bundestag parties (CDU/CSU, SPD, Grüne, Die Linke) hold **454 of 630 seats** — a more than comfortable majority for any combination excluding the AfD. The question is not whether the AfD can deny the others a majority; it is whether the AfD's continued rise forces the CDU into an increasingly uncomfortable position where it must choose between a demoralising grand coalition with a collapsing SPD or, eventually, some form of tolerance arrangement with the AfD.
+
+**The extreme tail risk: AfD + Die Linke jointly exceed 50%.** This scenario is currently remote — at March 2026 polling the two parties together hold roughly 36% (AfD ~25%, Linke ~11%), far short of a Bundestag majority. But it is not entirely inconceivable on a long-run trajectory where GroKo failure drives SPD voters further left and AfD consolidation continues. If AfD and Die Linke were together to cross the 316-seat threshold — say AfD at 33% and Linke at 18% after a prolonged governance crisis — **the Bundestag would face genuine deadlock**: no government could be formed without one of them, yet all mainstream parties refuse coalition with both. Under the Basic Law, if no Chancellor can be elected by absolute majority after repeated votes, the Federal President can either appoint a minority Chancellor or dissolve the Bundestag and call a snap election (Art. 63 IV GG). In practice, Die Linke folding to support a CDU minority Chancellor to avoid fresh elections is more likely than true deadlock — but the constitutional machinery would be tested as it has not been since the Federal Republic's founding. The scenario is assigned low probability but is included here because its structural trigger (GroKo failure → SPD collapse → Linke surge alongside AfD consolidation) is precisely the dynamic the current GroKo risks setting in motion.
+
+---
+
+# The SPD Collapse & the Left-of-Centre Realignment {.tabset}
+
+## The SPD's Long Decline
+
+```{r spd_decline}
+spd_history <- tibble(
+  Year  = c(1998, 2002, 2005, 2009, 2013, 2017, 2021, 2025),
+  SPD   = c(40.9, 38.5, 34.2, 23.0, 25.7, 20.5, 25.7, 16.4),
+  CDU_CSU = c(35.1, 38.5, 35.2, 33.8, 41.5, 32.9, 24.1, 28.5)
+)
+
+p_spd <- spd_history %>%
+  pivot_longer(cols = c(SPD, CDU_CSU), names_to = "Party", values_to = "Share") %>%
+  mutate(Party = recode(Party, "CDU_CSU" = "CDU/CSU")) %>%
+  ggplot(aes(x = Year, y = Share, colour = Party)) +
+  geom_line(linewidth = 1.5) +
+  geom_point(size = 3.5) +
+  geom_text_repel(aes(label = paste0(Share, "%")), size = 3.2, max.overlaps = 12) +
+  geom_hline(yintercept = 20, linetype = "dashed", colour = "grey50") +
+  annotate("text", x = 1999, y = 21.2,
+           label = "20% — informal 'major party' threshold", size = 3, colour = "grey40") +
+  scale_colour_manual(values = c("SPD" = "#E3000F", "CDU/CSU" = "#000000")) +
+  scale_y_continuous(labels = label_percent(scale = 1), limits = c(0, 50)) +
+  scale_x_continuous(breaks = c(1998, 2002, 2005, 2009, 2013, 2017, 2021, 2025)) +
+  labs(
+    title    = "SPD and CDU/CSU Federal Election Results, 1998–2025",
+    subtitle = "SPD's 40.9% in 1998 Schröder landslide to 16.4% in 2025 — a 24-point collapse over 27 years",
+    x        = "Election Year", y = "Vote Share (%)", colour = "Party",
+    caption  = "Source: Federal Returning Officer. 2025 result: SPD worst since 1887."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "bottom")
+
+print(p_spd)
+```
+
+The SPD's trajectory is arguably the most important structural fact in German politics. The party's overall electoral performance has been devastatingly poor, with its vote share declining from 40.9% in 1998 to 16.4% in 2025 — a decline due in large part to its failure to devise a strategic response to neoliberalism. The SPD's historic defeat is visible in the voter migration model: by far its largest single loss was to the CDU/CSU (1,760,000) — nearly 2.5 times the next largest outflow. The AfD took 720,000, while Die Linke absorbed 560,000 and BSW 440,000. The losses ran in multiple directions, but they were emphatically not equal: rightward flight to the CDU dominated.
+
+## Where Did SPD Voters Go?
+
+```{r spd_voter_migration}
+spd_migration <- tibble(
+  Destination = c("CDU/CSU", "AfD", "Non-voters/deceased",
+                   "Die Linke", "BSW", "Greens", "Other"),
+  Votes_lost  = c(1760, 720, 630, 560, 440, 100, 540),
+  Direction   = c("Right", "Far-right", "Abstention",
+                   "Radical left", "Anti-establishment left",
+                   "Centre-left", "Other")
+)
+
+p_migration <- spd_migration %>%
+  mutate(Destination = fct_reorder(Destination, Votes_lost)) %>%
+  ggplot(aes(x = Destination, y = Votes_lost / 1000, fill = Direction)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = paste0(round(Votes_lost / 1000, 2), "m")),
+            hjust = -0.2, size = 3.8, fontface = "bold") +
+  coord_flip(ylim = c(0, 2.2)) +
+  scale_fill_manual(values = c(
+    "Right"                      = "#000000",
+    "Far-right"                  = "#009EE0",
+    "Abstention"                 = "#AAAAAA",
+    "Radical left"               = "#BE3075",
+    "Anti-establishment left"    = "#8B1A1A",
+    "Centre-left"                = "#1AA037",
+    "Other"                      = "#CCCCCC"
+  )) +
+  labs(
+    title    = "SPD Voter Migration — Where 3.75 Million Votes Went in 2025",
+    subtitle = "Losses ran in every direction, but were far from equal — CDU/CSU (1.76m) dwarfed all other flows",
+    x        = NULL, y = "Votes lost (millions)", fill = "Political direction",
+    caption  = "Source: Infratest dimap exit poll voter migration model (2025)."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "right")
+
+print(p_migration)
+```
+
+## SPD's Neoliberal Shift: A Structural Analysis
+
+```{r spd_neoliberal_table}
+spd_shift <- tibble(
+  Period   = c("1998–2005 (Schröder / 'Third Way')",
+                "2005–2013 (GroKo junior partner)",
+                "2013–2021 (GroKo, then Ampel preparation)",
+                "2021–2024 (Ampel / traffic-light coalition)",
+                "2025– (GroKo junior partner under Merz CDU)"),
+  Economic_stance = c(
+    "Hartz I–IV welfare reforms: compulsory job schemes, benefit cuts. Germany's version of Blair-era 'progressive neoliberalism'.",
+    "Junior partner to CDU; no reversal of Hartz reforms; minimum wage introduced in 2015 as partial concession.",
+    "SPD began re-emphasising redistribution; Bürgergeld (citizen's income) eventually rebranded Hartz 4.",
+    "Coalition with Greens + FDP forced fiscal conservatism (debt brake); SPD failed to push social agenda against FDP veto.",
+    "Coalition contract includes €15/hr minimum wage, but SPD is now junior partner in CDU-led government; fiscal agenda set by Merz."
+  ),
+  Electoral_impact = c(
+    "Haemorrhage of blue-collar vote; Die Linke founded 2007 explicitly as an SPD splinter by those abandoned by Hartz.",
+    "SPD stabilised at ~25%; never recovered its pre-Schröder base.",
+    "Brief recovery to 25.7% in 2021 via Scholz 'competence' brand; did not translate into lasting structural gain.",
+    "Coalition seen as failure; SPD fell to 16.4% as largest losses went to CDU (right) and Die Linke/BSW (left).",
+    "No recovery path visible; SPD locked into governing with CDU, unable to differentiate or oppose."
+  )
+)
+
+spd_shift %>%
+  kable(
+    caption = "SPD Economic Policy Trajectory and Electoral Consequences",
+    col.names = c("Period", "Economic Policy Stance", "Electoral Impact"),
+    align = "lll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "18%") %>%
+  column_spec(2, width = "42%") %>%
+  column_spec(3, width = "40%", italic = TRUE)
+```
+
+The structural argument for SPD irreversibility is sobering. The party's entry into the 2025 GroKo as junior partner under Merz — after losing 10 points — replicates the pattern of every previous GroKo: the junior partner is punished at the next election. The SPD's blue-collar voters turned to the AfD, while centrist voters abandoned the SPD for the CDU/CSU or the Greens. Entering another GroKo forecloses the one obvious recovery strategy: opposition. The party that opposes Merz is Die Linke, not the SPD.
+
+---
+
+# Die Linke & Grüne: Can the Left Bypass the SPD? {.tabset}
+
+## The Convergence
+
+```{r left_convergence}
+left_trend <- polls_de %>%
+  select(date, SPD, Gruene, Linke) %>%
+  rename(Grüne = Gruene, `Die Linke` = Linke) %>%
+  pivot_longer(cols = c(SPD, Grüne, `Die Linke`),
+               names_to = "Party", values_to = "Share")
+
+p_left <- left_trend %>%
+  ggplot(aes(x = date, y = Share, colour = Party)) +
+  geom_line(linewidth = 1.4) +
+  geom_point(size = 2.5) +
+  # Mark crossover risk
+  geom_vline(xintercept = as.numeric(as.Date("2025-09-01")),
+             linetype = "dashed", colour = "#555555", alpha = 0.7) +
+  annotate("text", x = as.Date("2025-09-08"), y = 14,
+           label = "Saxony-Anhalt: AfD 39%\n(firewall pressure intensifies)",
+           size = 3, hjust = 0, colour = "#555555") +
+  scale_colour_manual(values = c(
+    "SPD"       = "#E3000F",
+    "Grüne"     = "#1AA037",
+    "Die Linke" = "#BE3075"
+  )) +
+  scale_y_continuous(labels = label_percent(scale = 1), limits = c(0, 22)) +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b\n%Y") +
+  labs(
+    title    = "SPD, Grüne & Die Linke — Vote Intention Trajectories, 2025–2026",
+    subtitle = "The SPD has flatlined at ~15% while Die Linke has risen to ~10-11%, narrowing the gap",
+    x        = NULL, y = "Vote Share (%)", colour = "Party",
+    caption  = "Sources: INSA, Forsa, PolitPro aggregate."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "right")
+
+print(p_left)
+```
+
+## Die Linke's Opportunity
+
+```{r linke_analysis}
+linke_factors <- tibble(
+  Direction  = c("For", "For", "For", "For",
+                  "Unclear", "Against", "Against"),
+  Factor     = c(
+    "Viral moment: Heidi Reichinnek's Bundestag speech against Merz-AfD cooperation (25m+ views)",
+    "Membership boom during 2025 campaign; party attracting young anti-fascist voters",
+    "Won 6 direct mandates in 2025 (4 in Berlin) — geographic strongholds emerging",
+    "Uniquely positioned as the only party that will never cooperate with CDU or AfD — a clear differentiator",
+    "BSW split: shed pro-Russia, socially conservative 'left in name only' voters; but also lost ~350k genuine supporters who may not return",
+    "Eastern strongholds overlap with AfD-dominated territory — hard to organise",
+    "Coalition prospects: if they join a CDU-led coalition they lose their identity; if they refuse they may be irrelevant in government"
+  ),
+  Importance = c(
+    "Very high — a defining cultural moment that gave Die Linke a new generation of voters",
+    "High — membership correlates with canvassing, fundraising and local councillor pipeline",
+    "High — direct mandates provide proportional representation even if they fall below 5%",
+    "High — the SPD is *in* the CDU-led GroKo, making Die Linke the largest left opposition. The Grüne are in opposition, but as a broadly pro-system party have less appetite for confrontation than Die Linke.",
+    "The split has two readings. Positive: freed from the Wagenknecht wing's cultural conservatism and pro-Russia positioning, Die Linke can openly court SPD refugees and young progressives previously deterred — and the post-split polling trajectory (rising membership, higher floor) lends weight to this. Negative: the ~350k BSW voters represent a distinct electorate unlikely to return, and BSW's continued presence fractures the broader left vote even in failure.",
+    "Moderate — party is weak in rural east despite ostensibly being the party for eastern workers",
+    "Critical — the same governing dilemma that destroyed the SPD. How Die Linke handles it will define the next decade."
+  )
+)
+
+linke_factors %>%
+  kable(
+    caption = "Die Linke: Key Factors in Challenging SPD as Germany's Primary Left Party",
+    col.names = c("Direction", "Factor", "Why It Matters"),
+    align = "lll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "8%",
+              color = "white",
+              background = case_when(
+                linke_factors$Direction == "For"     ~ "#02A95B",
+                linke_factors$Direction == "Against"  ~ "#cc3333",
+                TRUE                                  ~ "#888888")) %>%
+  column_spec(2, width = "42%") %>%
+  column_spec(3, width = "50%", italic = TRUE)
+```
+
+## Grüne vs Die Linke: Are They Competing?
+
+```{r green_linke_comparison}
+# Policy position comparison
+policy_comparison <- tibble(
+  Issue = c("Climate/environment", "Immigration/refugees", "NATO/military",
+             "Redistribution/wealth tax", "Housing/rent control",
+             "Anti-fascism / anti-AfD", "EU integration", "Coalition flexibility"),
+  Gruene_pos    = c("Core identity; strong support", "Pro-open borders; humanitarian",
+                     "Pro-NATO; supported Zeitenwende rearmament",
+                     "Moderate redistribution; market-friendly on industrial policy",
+                     "Some rent controls; pro-construction",
+                     "Strong formally; cooperated with CDU in federal coalition",
+                     "Strongly pro-EU", "Very high — governs with CDU or SPD"),
+  Linke_pos     = c("Strong support but secondary to social justice",
+                     "Pro-open borders; anti-deportation",
+                     "Anti-NATO; opposes rearmament and weapons to Ukraine",
+                     "Strong redistribution; wealth tax; anti-privatisation",
+                     "Strong rent control; socialisation of housing",
+                     "Core identity; explicitly refuses all cooperation with CDU/AfD",
+                     "Pro-EU but critical of austerity rules",
+                     "Very low — refuses coalition with CDU or right-leaning parties"),
+  Key_tension   = c("Grüne more technocratic; Linke more redistributive",
+                     "Both similar — but Linke more explicitly anti-deportation",
+                     "MAJOR DIVIDE — Grüne supports Zeitenwende; Linke opposes",
+                     "Linke more aggressive on wealth/tax; Grüne more business-compatible",
+                     "Both support; Linke more radical",
+                     "Grüne credibility weakened by governing with CDU",
+                     "Similar",
+                     "Linke's refusal to govern with CDU may be its biggest electoral asset")
+)
+
+policy_comparison %>%
+  kable(
+    caption = "Grüne vs Die Linke: Policy Positions and Key Divergences",
+    col.names = c("Issue", "Grüne Position", "Die Linke Position", "Key Tension"),
+    align = "llll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "12%") %>%
+  column_spec(2, width = "28%") %>%
+  column_spec(3, width = "28%") %>%
+  column_spec(4, width = "32%", italic = TRUE)
+```
+
+The critical structural observation is that the Grüne and Die Linke **are not in direct competition** for the same voter pool. The Greens attract urban, university-educated, post-materialist voters for whom climate and social liberalism are primary; Die Linke attracts economically precarious voters, eastern workers, young anti-fascist voters, and those for whom redistribution and anti-militarism are primary. Their overlap exists — both parties appeal to young progressives — but they are ultimately competing for different segments of a broader left-of-centre electorate. The more urgent question is whether either, together, can replace the SPD as the second anchor of the German left alongside the Greens.
+
+---
+
+# Historical Precedents for German Party Fragmentation {.tabset}
+
+### The Weimar Warning
+
+```{r weimar_comparison}
+weimar_data <- tibble(
+  Party   = c("NSDAP", "SPD", "KPD", "Centre", "DNVP", "Other", "Staatspartei"),
+  Votes   = c(37.4, 21.6, 14.6, 11.9, 5.9, 5.6, 1.0),
+  Year    = rep("1932 (Jul)", 7),
+  Modern_note = c("AfD analogue (populist far-right, anti-system)",
+                   "SPD (social democrats, collapsing under pressure)",
+                   "Die Linke (radical left, anti-establishment)",
+                   "CDU/CSU (Christian centre-right)",
+                   "Conservative nationalist splinter",
+                   "Various regional/special interest",
+                   "Liberal democrats (like FDP)")
+)
+
+# Note: this is NOT to equate AfD = NSDAP — the note column clarifies
+weimar_data %>%
+  kable(
+    caption = "July 1932 Reichstag Election — For Structural Comparison Only (NOT an equivalence claim)",
+    col.names = c("Party", "Vote %", "Year", "Structural analogue today"),
+    align = "lrll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  footnote(
+    general = "IMPORTANT: This table is presented for structural comparison of fragmentation patterns only.
+    The AfD is NOT the NSDAP, and current German democracy has robust constitutional safeguards that did not exist in 1932.
+    The comparison is to illustrate how fragmented electorates under economic stress can produce
+    anti-system surges — and the lesson that cordon sanitaire policies must be maintained rigorously.
+    The 5% threshold itself was introduced in 1949 precisely to prevent Weimar-style fragmentation.",
+    general_title = "CAUTION: "
+  )
+```
+
+### What Made 1932 Structurally Distinctive — and What It Signals for 2029
+
+The July 1932 election is analytically significant not merely because of the NSDAP's 37.4% result, but because of the **collapse of the political centre** under the pressure of Weimar's economic crisis. The SPD — like its modern counterpart — was haemorrhaging support in every direction: to the KPD on the radical left, and to the NSDAP from working-class voters who felt abandoned. The Centre Party and DNVP were locked in a defensive crouch. Crucially, **no majority coalition was possible that excluded the largest anti-system party** — producing the governance paralysis that ultimately allowed Hitler's appointment as Chancellor.
+
+The 2029 parallel is not equivalent, but it is structurally instructive. Consider a specific high-pressure scenario: the Kenya coalition (CDU/CSU + SPD + Grüne) is formed after the 2029 election to exclude the AfD, but **breaks down mid-term** — whether over fiscal policy, migration, or climate investment. The structural consequences of such a collapse would likely mirror 1932's dynamic in one key respect: **the parties associated with failed governance suffer punishing vote losses, while anti-system parties and genuine opposition parties gain**.
+
+```{r kenya_collapse_scenario}
+# Post-Kenya coalition collapse scenario — projecting vote-share shifts
+# Assumption: Kenya coalition (CDU/CSU + SPD + Grüne) fails in ~2031, leading to snap election
+# All three governing parties punished. Only Die Linke and AfD gain — the two parties
+# entirely outside the coalition and untouched by its failure.
+
+kenya_collapse <- tibble(
+  Party         = c("CDU/CSU", "AfD", "SPD", "Grüne", "Die Linke", "BSW", "FDP"),
+  Kenya_entry   = c(24, 25, 13, 13, 11, 4, 3),
+  Post_collapse = c(20, 31,  9,  9, 16, 5, 3),
+  Change        = c(-4, +6, -4, -4, +5, +1, 0),
+  Direction     = c("Loss", "Gain", "Loss", "Loss", "Gain", "Gain", "Unchanged")
+)
+
+kenya_collapse %>%
+  mutate(Change_fmt = ifelse(Change > 0, paste0("+", Change, "pp"), paste0(Change, "pp"))) %>%
+  select(Party, Kenya_entry, Post_collapse, Change_fmt, Direction) %>%
+  kable(
+    caption = "Projected Vote-Share Shifts: Kenya Coalition Entry vs Post-Collapse Snap Election",
+    col.names = c("Party", "At Kenya entry (%)", "Post-collapse (%)", "Change", "Direction"),
+    align = "lrrll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(kenya_collapse$Party == "AfD"),     bold = TRUE, color = "white", background = "#009EE0") %>%
+  row_spec(which(kenya_collapse$Party == "CDU/CSU"), bold = TRUE, color = "white", background = "#000000") %>%
+  row_spec(which(kenya_collapse$Party == "SPD"),     bold = TRUE, color = "white", background = "#E3000F") %>%
+  row_spec(which(kenya_collapse$Party == "Grüne"),   bold = TRUE, color = "white", background = "#1AA037") %>%
+  row_spec(which(kenya_collapse$Party == "Die Linke"), bold = TRUE, color = "white", background = "#BE3075") %>%
+  footnote(
+    general = "Scenario: Kenya coalition (CDU/CSU + SPD + Grüne) formed in 2029, collapses mid-term (~2031).
+    All three governing parties are punished — CDU/CSU for presiding over continued stagnation,
+    SPD for a second consecutive GroKo-style capitulation, and Grüne for compromising their
+    climate agenda to hold the coalition together. Only Die Linke (the KPD structural analogue —
+    consistent opposition, untouched by coalition failure) and the AfD gain substantially.
+    This is the core 1932 lesson: failed broad coalitions do not neutralise anti-system parties;
+    they feed them. CAUTION: Illustrative projections only, not predictions.",
+    general_title = "Note: "
+  )
+```
+
+The 1932 parallel therefore matters most not as a warning about the AfD specifically, but as a warning about **coalition overreach**: when a broad anti-AfD coalition is assembled to exclude the far-right, and then fails to govern effectively, it can produce exactly the voter migration it was designed to prevent. The Grüne are particularly exposed — as the smallest Kenya partner, with the most distinctive policy identity, they face the same governing-coalition trap that destroyed the SPD in the Ampel. The lesson is that a Kenya coalition in 2029 would need to be politically coherent — not merely a defensive bloc — to avoid becoming a self-defeating arrangement.
+
+### Post-War Fragmentation Patterns
+
+```{r postwar_fragmentation}
+postwar <- tibble(
+  Year    = c(1949, 1953, 1957, 1961, 1972, 1983, 1990, 1998, 2005, 2013, 2017, 2021, 2025),
+  Parties = c(8, 4, 3, 3, 3, 4, 5, 5, 5, 4, 6, 7, 5),
+  # Combined far-right vote share (excl. CDU/CSU itself)
+  Farright = c(11.1, 3.3, 1.0, 0.8, 0.3, 0.2, 2.4, 3.3, 1.6, 4.7, 12.6, 10.4, 20.8),
+  Max_share = c(31.0, 45.2, 50.2, 45.3, 45.8, 48.8, 43.8, 40.9, 35.2, 41.5, 32.9, 25.7, 28.5)
+)
+
+p_pw <- postwar %>%
+  ggplot(aes(x = Year, y = Max_share)) +
+  geom_line(colour = "grey60", linewidth = 1) +
+  geom_point(aes(colour = Farright, size = Parties)) +
+  geom_text_repel(aes(label = paste0(Year, " (", Parties, " parties)")),
+                  size = 2.8, max.overlaps = 12) +
+  scale_colour_gradient(low = "#FFCCCC", high = "#cc0000", name = "Far-right\nvote %") +
+  scale_size_continuous(range = c(2, 8), name = "Parties in\nBundestag") +
+  geom_hline(yintercept = 30, linetype = "dashed", colour = "darkred") +
+  annotate("text", x = 1950, y = 31.2,
+           label = "Below 30% = potential instability territory",
+           colour = "darkred", size = 3, hjust = 0) +
+  scale_y_continuous(limits = c(20, 56)) +
+  labs(
+    title    = "German Post-War Elections: Fragmentation, Leading Party Share & Far-Right Vote",
+    subtitle = "As the number of parties rises and the leading party falls below 30%, government formation becomes harder",
+    x        = "Election Year", y = "Leading Party's Vote Share (%)",
+    caption  = "Sources: Federal Returning Officer, academic election databases."
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "right")
+
+print(p_pw)
+```
+
+---
+
+# Coalition Arithmetic & Scenarios to 2029 {.tabset}
+
+## Current Bundestag (2025) Coalition Options
+
+```{r coalition_table_de}
+coalitions_de <- tibble(
+  Coalition = c(
+    "CDU/CSU + SPD (Grand Coalition — current government)",
+    "CDU/CSU + SPD + Grüne (Kenya coalition — theoretical)",
+    "CDU/CSU + AfD (Bahamas coalition)",
+    "SPD + Grüne + Die Linke (Red-Red-Green)",
+    "CDU/CSU alone (minority government)"
+  ),
+  Seats_2025 = c("208 + 121 = 329", "208 + 121 + 85 = 414", "208 + 151 = 359",
+                  "121 + 85 + 64 = 270", "208"),
+  Majority   = c("Yes (329 > 316)", "Yes (comfortable)", "Yes — but Brandmauer prohibits",
+                  "No (270 < 316)", "No (208 < 316)"),
+  Status     = c("In government as of Apr 2025", "Not formed — possible theoretically",
+                  "Refused — CDU maintains Brandmauer at federal level",
+                  "SPD is in GroKo — not available. Grüne are in opposition but will not join a left-only bloc without SPD anchor.",
+                  "Impossible without external support")
+)
+
+coalitions_de %>%
+  kable(
+    caption = "2025 Bundestag: Coalition Arithmetic and Feasibility",
+    col.names = c("Coalition", "Combined Seats", "Majority?", "Status"),
+    align = "llll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "28%") %>%
+  column_spec(2, width = "22%") %>%
+  column_spec(3, width = "18%") %>%
+  column_spec(4, width = "32%", italic = TRUE) %>%
+  row_spec(1, background = "#E8F4E8") %>%
+  row_spec(3, background = "#FFE8E8")
+```
+
+## 2029 Scenarios
+
+```{r scenarios_2029_de_text}
+scenarios_2029_table <- tibble(
+  Scenario   = c(
+    "A: AfD surges (30%)",
+    "A: AfD surges (30%)",
+    "B: AfD holds (25%), left gains",
+    "B: AfD holds (25%), left gains",
+    "C: AfD fades (20%), CDU recovers"
+  ),
+  Coalition  = c(
+    "CDU/CSU + SPD (GroKo) — impossible; 154+77=231, well short of 316",
+    "CDU/CSU + SPD + Grüne (Kenya coalition) — required for comfortable majority",
+    "CDU/CSU + SPD GroKo — impossible; 170+92=262, short of 316",
+    "CDU/CSU alone may need Grüne support",
+    "CDU/CSU + SPD GroKo — still short; 196+91=287; Kenya (196+91+105=392) or CDU+Linke needed"
+  ),
+  Combined_seats = c(
+    "154+77 = 231 — well short; Kenya (154+77+98=329) needed",
+    "350+ — comfortable",
+    "170+92 = 262 — short; Kenya (170+92+99=361) required",
+    "Multiple options",
+    "196+91 = 287 — still short; Kenya (196+91+105=392) comfortable"
+  ),
+  Likelihood = c(
+    "Possible if economic stagnation continues and CDU seen as failed incumbent",
+    "Most likely outcome in Scenario A — Merz would resist but may have no choice",
+    "Baseline; AfD at current polling trajectory; CDU weakened by GroKo incumbency",
+    "If GroKo fails visibly, CDU may need Kenya or early election",
+    "Requires CDU to successfully claim credit for economic improvement — uncertain"
+  )
+)
+
+scenarios_2029_table %>%
+  kable(
+    caption = "Plausible Coalition Scenarios by 2029",
+    col.names = c("Scenario", "Coalition / Arrangement", "Combined Seats", "Feasibility"),
+    align = "llll"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "16%") %>%
+  column_spec(2, width = "30%") %>%
+  column_spec(3, width = "22%") %>%
+  column_spec(4, width = "32%", italic = TRUE) %>%
+  collapse_rows(columns = 1, valign = "top")
+```
+
+## Most Likely Trajectory to 2029
+
+The post-2025 dynamics point toward a slow-burn political crisis rather than a sudden rupture. The most probable path looks as follows.
+
+**The baseline** is continued AfD consolidation at 24–27%, with the CDU/CSU and AfD trading first and second place in polls throughout 2026–2028. The GroKo will be blamed for continued economic difficulties — Germany's industrial base faces structural challenges from deindustrialisation and energy prices that no coalition can easily solve. The SPD will shed further ground after four years as GroKo junior partner — the historical pattern in every previous grand coalition. In the modelled scenarios its 2029 vote share falls to 11–13%, with losses flowing primarily to Die Linke and the Greens as the credible opposition. The question is not whether the SPD loses, but how much, and whether Die Linke emerges as Germany's clear second left party.
+
+**The Brandmauer pressure point** is September 2026. Saxony-Anhalt votes with the AfD at 39% in current polling — more than 10 points ahead of the CDU. If the firewall holds and a messy CDU-SPD-Die Linke or CDU-Die Linke arrangement is cobbled together, the AfD will claim democratic exclusion loudly and probably gain votes from it. If a CDU minority government in Saxony-Anhalt accepts AfD legislative support case-by-case, it will be described as a formal breach of the firewall — with severe implications for the federal level.
+
+**Die Linke and the Greens** are not structurally positioned to *replace* the SPD but are positioned to *split* its old electorate permanently. Die Linke at 10–11% in current polls, sustained by its role as the only genuine parliamentary opposition, represents a higher floor than the party has had since 2013. The Greens at 12% have stabilised after their Ampel losses. Together, a theoretical left bloc (SPD + Grüne + Die Linke) holds approximately 38% — not enough to govern without the CDU's participation, but enough to deny the right-AfD bloc a majority.
+
+---
+
+# Key Findings & Analysis
+
+```{r findings_de}
+findings_de <- tibble(
+  Theme = c(
+    "AfD Trajectory",
+    "Brandmauer Integrity",
+    "SPD Structural Decline",
+    "Die Linke Opportunity",
+    "Coalition Arithmetic",
+    "East-West Divide",
+    "Historical Parallel"
+  ),
+  `Current Status` = c(
+    "AfD at ~25% nationally (Mar 2026); doubled from 2021; leads CDU in multiple polls for first time",
+    "Holds federally on coalitions; BREACHED on Jan 29 2025 (indirect vote cooperation); eroded at municipal level",
+    "SPD at 15% now; modelled at 11–13% by 2029 after GroKo incumbency drag — consistent with every previous junior-partner punishment cycle",
+    "Die Linke at 10–11%; strongest since pre-BSW split; membership boom; Reichinnek viral moment",
+    "CDU/CSU + SPD GroKo holds 329/630 today but is projected to fall to 231–287 by 2029 across all scenarios — Kenya coalition likely required in every case",
+    "AfD dominates all 5 former East German states; Saxony-Anhalt AfD at 39% (Sep 2025 poll); firewall at breaking point in east",
+    "Post-war fragmentation record: 7 parties in 2021 reduced to 5 in 2025; but AfD at 20.8% is highest far-right share since Nazi era"
+  ),
+  `Key Implication` = c(
+    "AfD has passed the 'protest party' threshold — it is now a structural force with a durable social coalition",
+    "Municipal erosion + 2025 federal breach set a precedent; Saxony-Anhalt 2026 will test the federal level",
+    "Every GroKo punishes the junior partner; SPD projected at 11–13% by 2029, likely ceding second-left position to Die Linke",
+    "Unique positioning as only opposition party; refuses CDU/AfD cooperation; captures anti-establishment left",
+    "AfD cannot force a hung parliament under PR, but can force increasingly uncomfortable coalition maths for CDU",
+    "East German state elections 2026 are the critical near-term tests; if CDU accepts AfD support, firewall collapses nationally",
+    "5% threshold has prevented Weimar-style fragmentation but does not prevent sustained far-right consolidation above it"
+  )
+)
+
+findings_de %>%
+  kable(caption = "Summary of Key Analytical Findings — Germany 2025–2026",
+        align = "lll") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "14%") %>%
+  column_spec(2, width = "43%") %>%
+  column_spec(3, width = "43%", italic = TRUE)
+```
+
+---
+
+# Methodology & Data Notes
+
+```{r methodology_de, echo=FALSE}
+cat("
+DATA SOURCES
+============
+2025 Federal Election Results:
+  - Federal Returning Officer (Bundeswahlleiterin)
+    https://www.bundeswahlleiterin.de/en/bundestagswahlen/2025/ergebnisse/bund-99.html
+
+Post-election polling (2025–2026):
+  - INSA weekly tracker (PolitPro Score: 83/100)
+  - Forsa
+  - Infratest dimap (used for state-level Saxony-Anhalt figure)
+  - Forschungsgruppe Wahlen (Politbarometer)
+  - PolitPro aggregate trend (cross-firm average): https://politpro.eu/en/germany
+  Key individual polls:
+    - GMS Dec 2025/Jan 2026: AfD 27%, CDU 24% (first time AfD led nationally)
+    - INSA 20 Mar 2026: CDU 26%, AfD 25%, SPD 15%, Grüne 12%, Linke 11%
+    - PolitPro aggregate Mar 2026: CDU 25.9%, AfD 24.8%, SPD 14.5%, Grüne 12.5%, Linke 10.4%
+    - Infratest dimap Sep 2025 (Saxony-Anhalt): AfD 39%, CDU 27%, SPD 7%
+
+Voter migration analysis:
+  - Infratest dimap exit poll (2025 federal election)
+  - Friedrich-Ebert-Stiftung (FES) analysis of Bundestag Elections 2025
+    https://www.fes.de/en/german-election
+
+Brandmauer / firewall analysis:
+  - Wikipedia: Firewall against the far-right in Germany
+  - WZB Berlin Social Sciences Center (2025): empirical study of 11,053 local meetings
+    https://bibliothek.wzb.eu/pdf/2025/v25-501en.pdf
+  - MDR Investigativ (Saxony, Saxony-Anhalt, Thuringia municipal cooperation data)
+  - Jacobin: 'Germany's Not-So-Stable Firewall Against the Far Right'
+    https://jacobin.com/2025/01/germany-afd-cdu-far-right
+
+SPD decline analysis:
+  - Dostal (2025): 'German Social Democracy: Hollowed Out But Still in Government'
+    Political Quarterly, Wiley Online Library
+  - Rosa-Luxemburg-Stiftung: 'The 2025 German Election: First Impressions'
+    https://www.rosalux.de/en/news/id/53119
+
+MODELS USED
+===========
+- Poll aggregation: Cross-firm arithmetic mean of available polls per month.
+- Trend smoothing: 3-month rolling mean (zoo::rollmean).
+- Seat projection: Sainte-Laguë proportional allocation on 630-seat Bundestag,
+  restricted to parties above 5% threshold. Die Linke's direct mandate clause
+  (Federal Constitutional Court 2023) noted but not modelled separately.
+- Effective Number of Parties (ENP): Laakso-Taagepera (1979) index.
+
+LIMITATIONS
+===========
+- Polling data is estimated cross-firm monthly aggregates; individual polls
+  within each month may vary by ±3pp.
+- State-level data (Saxony-Anhalt, eastern Germany) uses single-firm Infratest
+  dimap figures and should be treated as indicative.
+- BSW future trajectory is highly uncertain following its 2025 federal failure;
+  figures above represent current cross-firm estimates only.
+- The 'Weimar comparison' table is structural only — no claim is made that the
+  AfD is equivalent to the NSDAP.
+")
+```
+
+---
+
+*Analysis produced in R Markdown. Post-election polling from INSA, Forsa, Infratest dimap, Forschungsgruppe Wahlen, and PolitPro aggregate. 2025 federal election data from the Federal Returning Officer. Voter migration from Infratest dimap exit poll. Brandmauer analysis from WZB Berlin (2025 empirical study). All projections are model estimates, not predictions.*
