@@ -1,2 +1,3 @@
-# Germany2029
-An analysis of the political environment in Germany for the 2029 general elections and beyond.
+# An Overview of Germany's Polling for the 2029 General Election
+This project combined current polling with historical trends to determine likely outcomes for the 2029 German General Election, and beyond.
+The PolitPro aggregate is used for polling data, and seat projections come from Sainte-Laguë seat allocation.
